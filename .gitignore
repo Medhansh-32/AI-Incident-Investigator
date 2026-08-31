@@ -16,3 +16,5 @@ frontend/out/
 .env
 .idea/
 .vscode/
+
+mcp-servers/github-mcp-server/ssh-pems
