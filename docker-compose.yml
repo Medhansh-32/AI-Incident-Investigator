@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aii-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aii
+      POSTGRES_USER: aii
+      POSTGRES_PASSWORD: aii_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - aii_pg_data:/var/lib/postgresql/data
+      - ./backend/src/main/resources/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  aii_pg_data:

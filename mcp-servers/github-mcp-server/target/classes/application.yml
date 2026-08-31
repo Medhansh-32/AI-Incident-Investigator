@@ -1,0 +1,35 @@
+server:
+  port: 8889
+
+spring:
+  application:
+    name: github-mcp-server
+  ai:
+    mcp:
+      server:
+        name: github-mcp-server
+        version: 0.1.0
+        protocol: STREAMABLE
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/incident_investigator
+    username: postgres
+    password: 1234
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+github:
+  token: ${GITHUB_TOKEN:}
+
+logging:
+  level:
+    com.aii.mcp.github: DEBUG
+    org.springframework.ai.mcp: DEBUG
+    io.modelcontextprotocol: DEBUG
