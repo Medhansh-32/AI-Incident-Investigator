@@ -1,0 +1,37 @@
+server:
+  port: 8889
+
+spring:
+  application:
+    name: github-mcp-server
+  ai:
+    mcp:
+      server:
+        name:   mcp-server
+        version: 0.1.0
+        protocol: STREAMABLE
+
+  datasource:
+    url: jdbc:postgresql://ep-delicate-pond-azzzbwd0-pooler.c-3.ap-southeast-1.aws.neon.tech/mcp_server_db?sslmode=require&channel_binding=require
+    username: neondb_owner
+    password: npg_HSnrFdxE10jZ
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+github:
+  token: ${GITHUB_TOKEN:}
+
+logging:
+  level:
+    com.aii.mcp.github: DEBUG
+    org.springframework.ai.mcp: DEBUG
+    io.modelcontextprotocol: DEBUG
+
+SSH_ENCRYPTION_KEY: frxDFbOL/BN4dIoSIBE6D+Gy5lOXIb4h3llmUHi4wMU=
