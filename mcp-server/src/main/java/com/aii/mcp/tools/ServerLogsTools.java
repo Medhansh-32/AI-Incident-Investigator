@@ -209,16 +209,30 @@ public class ServerLogsTools {
 
         return sshService.runCommand(config, cmd);
     }
-    @Tool(description = "Get a count of distinct ERROR-level messages logged by a service, most frequent first. "
-            + "Helps spot repeating failures (e.g. the same bad input hit on a schedule).")
+    @Tool(description = "Get a count of distinct ERROR-level messages, optionally restricted to a date prefix, "
+            + "across the live log and archived logs.")
     public Map<String, Object> getErrorSummary(
             @ToolParam(description = "Registered service name") String serviceName,
+            @ToolParam(description = "Optional date prefix, e.g. '2026-09-01'") String datePrefix,
             @ToolParam(description = "Max distinct error types to return, default 20") Integer maxResults) {
 
         ServerLogConfig config = configService.getByServiceName(serviceName);
         int cap = (maxResults == null || maxResults <= 0) ? 20 : maxResults;
-        String cmd = "grep -oP '(?<=ERROR ).*' " + config.getLogFilePath()
-                + " | sort | uniq -c | sort -rn | head -" + cap;
+        String logDir = getLogDirectory(config.getLogFilePath());
+
+        String cmd = "find " + shellQuote(logDir) +
+                " -maxdepth 2 -type f \\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) -print 2>/dev/null | ";
+
+        if (datePrefix != null && !datePrefix.isBlank()) {
+            String safeDate = shellQuote(datePrefix);
+            cmd += "while read -r file; do " +
+                    "if echo \"$file\" | grep -F -- " + safeDate + " >/dev/null; then zcat -f \"$file\" 2>/dev/null; " +
+                    "else zcat -f \"$file\" 2>/dev/null | grep -F -- " + safeDate + "; fi; done";
+        } else {
+            cmd += "while read -r file; do zcat -f \"$file\" 2>/dev/null; done";
+        }
+
+        cmd += " | grep -oP '(?<=ERROR ).*' | sort | uniq -c | sort -rn | head -" + cap;
         return sshService.runCommand(config, cmd);
     }
 
