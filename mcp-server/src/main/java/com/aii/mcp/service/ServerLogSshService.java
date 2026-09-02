@@ -9,7 +9,9 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,7 +29,7 @@ public class ServerLogSshService {
     // --- Command allowlist -------------------------------------------------
     // Only these binaries may appear anywhere in a command (including inside a
     // pipeline). If it's not read-only diagnostics, it doesn't belong here.
-    // NOTE: this deliberately does NOT include find, awk, sed, xargs, python,
+    // NOTE: this deliberately does NOT include awk, sed, xargs, python,
     // perl, bash, sh, curl, wget, nc, scp, or any other binary that can write
     // files, make network calls, or execute arbitrary code. Adding a new
     // binary to this set is a security decision, not a convenience one.
@@ -210,7 +212,11 @@ public class ServerLogSshService {
      *   2. It contains no file-writing redirection ('>' / '<'), except the fixed,
      *      non-writing forms in SAFE_REDIRECTS (e.g. 2>&1, 2>/dev/null).
      *   3. It doesn't end with a background operator ('&').
-     *   4. Every pipeline segment's leading binary is in ALLOWED_BINARIES.
+     *   4. Every pipeline segment's leading binary is in ALLOWED_BINARIES, where
+     *      pipeline segments are split on '|' that appears OUTSIDE single/double
+     *      quotes — a quoted grep/egrep pattern is allowed to contain a literal
+     *      '|' (e.g. regex alternation like 'foo|bar') without being mistaken
+     *      for a real shell pipe boundary.
      *
      * This replaces the previous denylist, which only rejected a handful of known-bad
      * tokens and could be bypassed by anything not on that specific list (curl, pkill,
@@ -246,7 +252,7 @@ public class ServerLogSshService {
             throw new IllegalArgumentException("Command rejected: file redirection is not allowed");
         }
 
-        String[] segments = command.split("\\|");
+        List<String> segments = splitPipelineRespectingQuotes(command);
         for (String segment : segments) {
             String trimmed = segment.trim();
             if (trimmed.isEmpty()) {
@@ -262,5 +268,38 @@ public class ServerLogSshService {
                                 + "Allowed: " + String.join(", ", ALLOWED_BINARIES));
             }
         }
+    }
+
+    /**
+     * Splits a command into pipeline segments on '|', but ignores any '|' that
+     * appears inside a single- or double-quoted region. This is a simple
+     * character-scanning tokenizer (not a full shell parser) — it's enough to
+     * stop a literal pipe inside a quoted grep/egrep pattern (e.g. 'foo|bar')
+     * from being misread as a pipeline boundary and rejected as an "unknown
+     * binary" segment.
+     */
+    private static List<String> splitPipelineRespectingQuotes(String command) {
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inSingle = false;
+        boolean inDouble = false;
+
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+            if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+                current.append(c);
+            } else if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+                current.append(c);
+            } else if (c == '|' && !inSingle && !inDouble) {
+                segments.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        segments.add(current.toString());
+        return segments;
     }
 }
