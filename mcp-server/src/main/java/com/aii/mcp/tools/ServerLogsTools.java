@@ -63,101 +63,84 @@ public class ServerLogsTools {
         return sshService.runCommand(config, cmd);
     }
 
-    @Tool(description = "List rotated/archived log files for a registered service (e.g. app.log.1, app.log.2.gz, "
-            + "app.log-2026-07-28) found alongside the live log file, newest first. Use this to see what history "
-            + "is actually available before searching further back than the current log file.")
+    @Tool(description = "List all log files available for a registered service, "
+            + "including the live log, rotated logs, and logs stored in archive directories. "
+            + "Use this before searching historical logs when the archive layout is unknown.")
     public Map<String, Object> listLogArchives(
             @ToolParam(description = "Registered service name") String serviceName) {
 
         ServerLogConfig config = configService.getByServiceName(serviceName);
-        String logPath = config.getLogFilePath();
-        String cmd = "ls -lt " + logPath + "* 2>/dev/null";
-        return sshService.runCommand(config, cmd);
-    }
-
-    @Tool(description = "Search a service's log files for a text or regex pattern. "
-            + "Automatically discovers the live log, rotated logs, and archived logs up to "
-            + "2 directory levels below the configured log directory. Supports .gz files. "
-            + "Returns up to maxResults matching lines per file, with the most recently "
-            + "modified files searched first.")
-    public Map<String, Object> searchArchivedLogs(
-            @ToolParam(description = "Registered service name") String serviceName,
-            @ToolParam(description = "Text or regex pattern to search for") String pattern,
-            @ToolParam(description = "Max matching lines to return per file, default 200") Integer maxResults) {
-
-        ServerLogConfig config = configService.getByServiceName(serviceName);
-
-        int cap = (maxResults == null || maxResults <= 0) ? 200 : maxResults;
 
         String logPath = config.getLogFilePath();
 
         if (logPath == null || logPath.isBlank()) {
-            throw new IllegalArgumentException("No log file path configured for service: " + serviceName);
+            throw new IllegalArgumentException(
+                    "No log file path configured for service: " + serviceName);
         }
+
+        String logDir = getLogDirectory(logPath);
+
+        String cmd =
+                "find " + shellQuote(logDir) +
+                        " -maxdepth 2 -type f " +
+                        "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
+                        "-printf '%T@ %p\\n' " +
+                        "2>/dev/null | sort -rn";
+
+        return sshService.runCommand(config, cmd);
+    }
+
+    @Tool(description = "Search a service's live, rotated, and archived log files for a text or regex pattern. "
+            + "Automatically discovers log files up to 2 directory levels below the configured log directory, "
+            + "including .gz files. Returns up to maxResults matching lines per file, newest files first.")
+    public Map<String, Object> searchArchivedLogs(
+            @ToolParam(description = "Registered service name") String serviceName,
+            @ToolParam(description = "Text or regex pattern to search for") String pattern,
+            @ToolParam(description = "Max matching lines per file, default 200") Integer maxResults) {
+
+        ServerLogConfig config = configService.getByServiceName(serviceName);
 
         if (pattern == null || pattern.isBlank()) {
             throw new IllegalArgumentException("Search pattern cannot be empty");
         }
 
-        /*
-         * Example:
-         *
-         * /var/log/mobycy/zypp-erp/zypp-erp.log
-         *
-         * We derive:
-         *
-         * /var/log/mobycy/zypp-erp
-         *
-         * and discover files from there instead of assuming the archive
-         * directory/file naming convention.
-         */
-        int lastSlash = logPath.lastIndexOf('/');
+        int cap = (maxResults == null || maxResults <= 0)
+                ? 200
+                : Math.min(maxResults, 1000);
 
-        String logDir = lastSlash > 0
-                ? logPath.substring(0, lastSlash)
-                : ".";
+        String logPath = config.getLogFilePath();
 
-        /*
-         * Escape single quotes for safe shell usage.
-         */
+        if (logPath == null || logPath.isBlank()) {
+            throw new IllegalArgumentException(
+                    "No log file path configured for service: " + serviceName);
+        }
+
+        String logDir = getLogDirectory(logPath);
+
         String safePattern = shellQuote(pattern);
 
         /*
-         * Find all log-like files up to 2 levels below the service's
-         * configured log directory.
+         * Discover files newest first.
          *
-         * %T@ gives modification time so we can search newest files first.
+         * Example:
          *
-         * -print0 / sort -z / read -d '' makes this safe for filenames
-         * containing spaces.
+         * /var/log/mobycy/zypp-erp/zypp-erp.log
+         * /var/log/mobycy/zypp-erp/archived/zypp-erp-2026-09-01.0.log.gz
+         * /var/log/mobycy/zypp-erp/archived/zypp-erp-2026-08-31.0.log.gz
          */
-        String discoverFiles =
+        String cmd =
                 "find " + shellQuote(logDir) +
                         " -maxdepth 2 -type f " +
                         "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
-                        "-printf '%T@ %p\\0' 2>/dev/null " +
-                        "| sort -z -rn " +
-                        "| cut -z -d' ' -f2-";
-
-        /*
-         * zcat -f handles both:
-         *
-         *   normal .log files
-         *   .gz files
-         *
-         * grep -E allows the pattern parameter to be a regex.
-         */
-        String cmd =
-                discoverFiles +
-                        " | while IFS= read -r -d '' file; do " +
-                        "     matches=$(zcat -f -- \"$file\" 2>/dev/null " +
-                        "         | grep -i -E -- " + safePattern +
-                        "         | head -n " + cap + "); " +
-                        "     if [ -n \"$matches\" ]; then " +
-                        "         echo \"===== $file =====\"; " +
-                        "         printf '%s\\n' \"$matches\"; " +
-                        "     fi; " +
-                        "   done";
+                        "-printf '%T@ %p\\n' " +
+                        "2>/dev/null | sort -rn | " +
+                        "while read -r entry; do " +
+                        "file=\"${entry#* }\"; " +
+                        "echo \"===== $file =====\"; " +
+                        "zcat -f " + "\"$file\"" +
+                        " 2>/dev/null | grep -i -E -- " + safePattern +
+                        " | head -n " + cap + "; " +
+                        "done";
 
         return sshService.runCommand(config, cmd);
     }
@@ -177,8 +160,8 @@ public class ServerLogsTools {
 
     @Tool(description = "Get a breakdown of HTTP response codes logged by a service. "
             + "Optionally restrict results to a date prefix such as '2026-09-01'. "
-            + "Automatically searches the live log, rotated logs, and archived logs "
-            + "including .gz files. Useful for spotting elevated HTTP error rates.")
+            + "Searches the live log, rotated logs, and archived logs including .gz files. "
+            + "The date filter can match either the log filename or the log contents.")
     public Map<String, Object> getResponseCodeStats(
             @ToolParam(description = "Registered service name") String serviceName,
             @ToolParam(description = "Optional date prefix, e.g. '2026-09-01'") String datePrefix) {
@@ -188,65 +171,61 @@ public class ServerLogsTools {
         String logPath = config.getLogFilePath();
 
         if (logPath == null || logPath.isBlank()) {
-            throw new IllegalArgumentException("No log file path configured for service: " + serviceName);
+            throw new IllegalArgumentException(
+                    "No log file path configured for service: " + serviceName);
         }
 
-        int lastSlash = logPath.lastIndexOf('/');
+        String logDir = getLogDirectory(logPath);
 
-        String logDir = lastSlash > 0
-                ? logPath.substring(0, lastSlash)
-                : ".";
+        String cmd;
 
-        /*
-         * Discover all relevant log files.
-         *
-         * Example:
-         *
-         * /var/log/mobycy/zypp-erp/zypp-erp.log
-         * /var/log/mobycy/zypp-erp/archived/zypp-erp-2026-09-01.0.log.gz
-         * /var/log/mobycy/zypp-erp/archive/anything.gz
-         * /var/log/mobycy/zypp-erp/zypp-erp.log.1
-         *
-         * No archive naming convention is assumed.
-         */
-        String discoverFiles =
-                "find " + shellQuote(logDir) +
-                        " -maxdepth 2 -type f " +
-                        "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
-                        "-printf '%T@ %p\\0' 2>/dev/null " +
-                        "| sort -z -rn " +
-                        "| cut -z -d' ' -f2-";
+        if (datePrefix == null || datePrefix.isBlank()) {
 
-        String dateFilter = "";
+            cmd =
+                    "find " + shellQuote(logDir) +
+                            " -maxdepth 2 -type f " +
+                            "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
+                            "-print 2>/dev/null | " +
+                            "while read -r file; do " +
+                            "zcat -f \"$file\" 2>/dev/null; " +
+                            "done | " +
+                            "grep -oP 'Response:\\d+' | " +
+                            "sort | uniq -c | sort -rn";
 
-        if (datePrefix != null && !datePrefix.isBlank()) {
+        } else {
 
-            String safeDatePrefix = shellQuote(datePrefix);
+            String safeDate = shellQuote(datePrefix);
 
             /*
-             * Filter the CONTENT of the logs.
+             * Search both:
              *
-             * This means we don't depend on the archive filename containing
-             * the date. If the date appears in the actual log line, it works.
+             * 1. filename
+             * 2. log contents
+             *
+             * This handles archives such as:
+             *
+             * zypp-erp-2026-09-01.0.log.gz
+             *
+             * even if the log lines themselves don't contain the date.
              */
-            dateFilter =
-                    " | grep -F -- " + safeDatePrefix;
+            cmd =
+                    "find " + shellQuote(logDir) +
+                            " -maxdepth 2 -type f " +
+                            "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
+                            "-print 2>/dev/null | " +
+                            "while read -r file; do " +
+                            "if echo \"$file\" | grep -F -- " + safeDate + " >/dev/null; then " +
+                            "zcat -f \"$file\" 2>/dev/null; " +
+                            "else " +
+                            "zcat -f \"$file\" 2>/dev/null | grep -F -- " + safeDate + "; " +
+                            "fi; " +
+                            "done | " +
+                            "grep -oP 'Response:\\d+' | " +
+                            "sort | uniq -c | sort -rn";
         }
-
-        String cmd =
-                discoverFiles +
-                        " | while IFS= read -r -d '' file; do " +
-                        "     zcat -f -- \"$file\" 2>/dev/null; " +
-                        "   done" +
-                        dateFilter +
-                        " | grep -oP 'Response:\\d+' " +
-                        " | sort " +
-                        " | uniq -c " +
-                        " | sort -rn";
 
         return sshService.runCommand(config, cmd);
     }
-
     @Tool(description = "Get a count of distinct ERROR-level messages logged by a service, most frequent first. "
             + "Helps spot repeating failures (e.g. the same bad input hit on a schedule).")
     public Map<String, Object> getErrorSummary(
@@ -321,14 +300,6 @@ public class ServerLogsTools {
         System.out.println(">>> ServerLogsTools CREATED");
     }
 
-    private String shellQuote(String value) {
-        if (value == null) {
-            return "''";
-        }
-
-        return "'" + value.replace("'", "'\"'\"'") + "'";
-    }
-
     @Tool(description = "List all log files discovered for a registered service, "
             + "including the live log, rotated logs, and archived logs. "
             + "Files are returned from newest to oldest based on modification time.")
@@ -358,4 +329,23 @@ public class ServerLogsTools {
 
         return sshService.runCommand(config, cmd);
     }
+
+
+    private String getLogDirectory(String logPath) {
+        int lastSlash = logPath.lastIndexOf('/');
+
+        return lastSlash > 0
+                ? logPath.substring(0, lastSlash)
+                : ".";
+    }
+
+    private String shellQuote(String value) {
+        if (value == null) {
+            return "''";
+        }
+
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
 }
+
