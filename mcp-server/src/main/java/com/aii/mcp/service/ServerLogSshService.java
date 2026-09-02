@@ -248,7 +248,11 @@ public class ServerLogSshService {
         for (Pattern safe : SAFE_REDIRECTS) {
             scrubbed = safe.matcher(scrubbed).replaceAll("");
         }
-        if (scrubbed.contains(">") || scrubbed.contains("<")) {
+        // Ignore '<'/'>' that appear inside quotes — a regex lookbehind/lookahead
+        // like '(?<=ERROR )' or a literal comparison in a search pattern contains
+        // these characters without being real shell redirection.
+        String unquoted = removeQuotedRegions(scrubbed);
+        if (unquoted.contains(">") || unquoted.contains("<")) {
             throw new IllegalArgumentException("Command rejected: file redirection is not allowed");
         }
 
@@ -268,6 +272,35 @@ public class ServerLogSshService {
                                 + "Allowed: " + String.join(", ", ALLOWED_BINARIES));
             }
         }
+    }
+
+    /**
+     * Returns the command with all single- and double-quoted regions stripped out
+     * (quote marks and their contents removed entirely), so characters that only
+     * appear inside a quoted argument — such as '<'/'>' in a regex lookaround —
+     * aren't mistaken for real shell metacharacters.
+     */
+    private static String removeQuotedRegions(String command) {
+        StringBuilder result = new StringBuilder();
+        boolean inSingle = false;
+        boolean inDouble = false;
+
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+            if (c == '\'' && !inDouble) {
+                inSingle = !inSingle;
+                continue;
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble;
+                continue;
+            }
+            if (inSingle || inDouble) {
+                continue;
+            }
+            result.append(c);
+        }
+        return result.toString();
     }
 
     /**
