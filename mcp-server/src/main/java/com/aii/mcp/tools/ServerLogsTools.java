@@ -275,7 +275,11 @@ public class ServerLogsTools {
             return emptyResult(serviceName, "no log files found");
         }
 
-        String combinedOut = collectByDatePrefix(config, files, datePrefix, "grep -oP '(?<=ERROR ).*'");
+        // Uses \K (PCRE "reset match start") instead of a (?<=...) lookbehind — a
+        // lookbehind's literal '<' character is indistinguishable, to the guard's
+        // plain-text redirection check, from real shell input redirection, and
+        // gets rejected as "file redirection is not allowed".
+        String combinedOut = collectByDatePrefix(config, files, datePrefix, "grep -oP 'ERROR \\K.*'");
         return countAndSort(serviceName, combinedOut, "errorMessage", cap);
     }
 
