@@ -11,8 +11,10 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 
 @Service
 public class ServerLogSshService {
@@ -21,6 +23,28 @@ public class ServerLogSshService {
     private static final int CHANNEL_TIMEOUT_MS = 20_000;
     private static final int MAX_OUTPUT_CHARS = 100_000;
     private static final long POLL_INTERVAL_MS = 15L;
+
+    // --- Command allowlist -------------------------------------------------
+    // Only these binaries may appear anywhere in a command (including inside a
+    // pipeline). If it's not read-only diagnostics, it doesn't belong here.
+    // NOTE: this deliberately does NOT include find, awk, sed, xargs, python,
+    // perl, bash, sh, curl, wget, nc, scp, or any other binary that can write
+    // files, make network calls, or execute arbitrary code. Adding a new
+    // binary to this set is a security decision, not a convenience one.
+    private static final Set<String> ALLOWED_BINARIES = Set.of(
+            "tail", "head", "cat", "grep", "egrep", "fgrep", "zgrep", "zcat", "gunzip",
+            "wc", "sort", "uniq", "echo", "uptime", "free", "df", "pgrep", "journalctl",
+            "ls", "stat", "fuser", "date"
+    );
+
+    // Fixed-descriptor redirects that don't write to the filesystem, so they're
+    // safe even though they contain '>'. Everything else with '>' or '<' is rejected.
+    private static final Pattern[] SAFE_REDIRECTS = {
+            Pattern.compile("2>&1"),
+            Pattern.compile("1>&2"),
+            Pattern.compile(">\\s*/dev/null"),
+            Pattern.compile("2>\\s*/dev/null")
+    };
 
     private final EncryptionService encryptionService;
 
@@ -180,12 +204,62 @@ public class ServerLogSshService {
         return "'" + value.replace("'", "'\\''") + "'";
     }
 
+    /**
+     * Allowlist-based validation. A command is accepted only if:
+     *   1. It contains no chaining or substitution operators (; && || ` $( newline).
+     *   2. It contains no file-writing redirection ('>' / '<'), except the fixed,
+     *      non-writing forms in SAFE_REDIRECTS (e.g. 2>&1, 2>/dev/null).
+     *   3. It doesn't end with a background operator ('&').
+     *   4. Every pipeline segment's leading binary is in ALLOWED_BINARIES.
+     *
+     * This replaces the previous denylist, which only rejected a handful of known-bad
+     * tokens and could be bypassed by anything not on that specific list (curl, pkill,
+     * tee, mv, cp, cat of secret files, etc). An allowlist fails closed instead of open:
+     * anything not explicitly recognized as safe is rejected by default.
+     *
+     * This is still string-based validation, not a real shell parser, so treat it as a
+     * strong guardrail rather than a formal guarantee — the more robust long-term fix is
+     * to stop accepting free-form shell strings entirely and expose only small,
+     * parameterized tool methods (as most of ServerLogsTools already does).
+     */
     private static void guardAgainstDestructiveCommands(String command) {
-        String lower = command.toLowerCase();
-        String[] blocked = {"rm ", "rm -", ">", ">>", "mkfs", "dd ", "shutdown", "reboot", "kill ", "chmod ", "chown "};
-        for (String token : blocked) {
-            if (lower.contains(token)) {
-                throw new IllegalArgumentException("Command rejected: contains disallowed token '" + token.trim() + "'");
+        if (command == null || command.isBlank()) {
+            throw new IllegalArgumentException("Command rejected: empty command");
+        }
+
+        if (command.contains(";") || command.contains("&&") || command.contains("||")
+                || command.contains("`") || command.contains("$(") || command.contains("\n")
+                || command.contains("\r")) {
+            throw new IllegalArgumentException(
+                    "Command rejected: chaining or command substitution is not allowed");
+        }
+
+        if (command.trim().endsWith("&")) {
+            throw new IllegalArgumentException("Command rejected: background execution is not allowed");
+        }
+
+        String scrubbed = command;
+        for (Pattern safe : SAFE_REDIRECTS) {
+            scrubbed = safe.matcher(scrubbed).replaceAll("");
+        }
+        if (scrubbed.contains(">") || scrubbed.contains("<")) {
+            throw new IllegalArgumentException("Command rejected: file redirection is not allowed");
+        }
+
+        String[] segments = command.split("\\|");
+        for (String segment : segments) {
+            String trimmed = segment.trim();
+            if (trimmed.isEmpty()) {
+                throw new IllegalArgumentException("Command rejected: empty pipeline segment");
+            }
+            String firstToken = trimmed.split("\\s+", 2)[0];
+            String binary = firstToken.contains("/")
+                    ? firstToken.substring(firstToken.lastIndexOf('/') + 1)
+                    : firstToken;
+            if (!ALLOWED_BINARIES.contains(binary)) {
+                throw new IllegalArgumentException(
+                        "Command rejected: '" + binary + "' is not on the read-only command allowlist. "
+                                + "Allowed: " + String.join(", ", ALLOWED_BINARIES));
             }
         }
     }
