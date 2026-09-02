@@ -34,7 +34,7 @@ public class ServerLogSshService {
     private static final Set<String> ALLOWED_BINARIES = Set.of(
             "tail", "head", "cat", "grep", "egrep", "fgrep", "zgrep", "zcat", "gunzip",
             "wc", "sort", "uniq", "echo", "uptime", "free", "df", "pgrep", "journalctl",
-            "ls", "stat", "fuser", "date"
+            "ls", "stat", "fuser", "date", "find"
     );
 
     // Fixed-descriptor redirects that don't write to the filesystem, so they're

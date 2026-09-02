@@ -90,57 +90,40 @@ public class ServerLogsTools {
         return sshService.runCommand(config, cmd);
     }
 
-    @Tool(description = "Search a service's live, rotated, and archived log files for a text or regex pattern. "
-            + "Automatically discovers log files up to 2 directory levels below the configured log directory, "
-            + "including .gz files. Returns up to maxResults matching lines per file, newest files first.")
+    @Tool(description = "Search a service's live, rotated, and archived log files for a text or regex pattern, "
+            + "optionally restricted to files/content matching a date prefix (e.g. '2026-09-01').")
     public Map<String, Object> searchArchivedLogs(
             @ToolParam(description = "Registered service name") String serviceName,
             @ToolParam(description = "Text or regex pattern to search for") String pattern,
+            @ToolParam(description = "Optional date prefix, e.g. '2026-09-01', to restrict which files are scanned") String datePrefix,
             @ToolParam(description = "Max matching lines per file, default 200") Integer maxResults) {
 
         ServerLogConfig config = configService.getByServiceName(serviceName);
-
         if (pattern == null || pattern.isBlank()) {
             throw new IllegalArgumentException("Search pattern cannot be empty");
         }
-
-        int cap = (maxResults == null || maxResults <= 0)
-                ? 200
-                : Math.min(maxResults, 1000);
-
+        int cap = (maxResults == null || maxResults <= 0) ? 200 : Math.min(maxResults, 1000);
         String logPath = config.getLogFilePath();
-
         if (logPath == null || logPath.isBlank()) {
-            throw new IllegalArgumentException(
-                    "No log file path configured for service: " + serviceName);
+            throw new IllegalArgumentException("No log file path configured for service: " + serviceName);
         }
-
         String logDir = getLogDirectory(logPath);
-
         String safePattern = shellQuote(pattern);
 
-        /*
-         * Discover files newest first.
-         *
-         * Example:
-         *
-         * /var/log/mobycy/zypp-erp/zypp-erp.log
-         * /var/log/mobycy/zypp-erp/archived/zypp-erp-2026-09-01.0.log.gz
-         * /var/log/mobycy/zypp-erp/archived/zypp-erp-2026-08-31.0.log.gz
-         */
-        String cmd =
-                "find " + shellQuote(logDir) +
-                        " -maxdepth 2 -type f " +
-                        "\\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
-                        "-printf '%T@ %p\\n' " +
-                        "2>/dev/null | sort -rn | " +
-                        "while read -r entry; do " +
-                        "file=\"${entry#* }\"; " +
-                        "echo \"===== $file =====\"; " +
-                        "zcat -f " + "\"$file\"" +
-                        " 2>/dev/null | grep -i -E -- " + safePattern +
-                        " | head -n " + cap + "; " +
-                        "done";
+        String findPart = "find " + shellQuote(logDir) +
+                " -maxdepth 2 -type f \\( -name '*.log' -o -name '*.log.*' -o -name '*.gz' \\) " +
+                "-printf '%T@ %p\\n' 2>/dev/null | sort -rn";
+
+        if (datePrefix != null && !datePrefix.isBlank()) {
+            // keep only entries whose filename contains the date prefix
+            findPart += " | grep -F -- " + shellQuote(datePrefix);
+        }
+
+        String cmd = findPart +
+                " | while read -r entry; do " +
+                "file=\"${entry#* }\"; echo \"===== $file =====\"; " +
+                "zcat -f \"$file\" 2>/dev/null | grep -i -E -- " + safePattern +
+                " | head -n " + cap + "; done";
 
         return sshService.runCommand(config, cmd);
     }
