@@ -119,10 +119,19 @@ public class ServerLogsTools {
         ServerLogConfig config = configService.getByServiceName(serviceName);
         String logPath = requireLogPath(config, serviceName);
         String q = shellQuote(logPath);
-        String cmd = "echo '--- first ---'; head -1 " + q
-                + "; echo '--- last ---'; tail -1 " + q
-                + "; echo '--- lines ---'; wc -l " + q;
-        return sshService.runCommand(config, cmd);
+
+        // Each sub-check is its own flat command — the old version joined these with
+        // ';', which the allowlist guard always rejects regardless of quoting.
+        Map<String, Object> first = sshService.runCommand(config, "head -1 " + q);
+        Map<String, Object> last = sshService.runCommand(config, "tail -1 " + q);
+        Map<String, Object> count = sshService.runCommand(config, "wc -l " + q);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("service", serviceName);
+        result.put("firstLine", String.valueOf(first.getOrDefault("stdout", "")).trim());
+        result.put("lastLine", String.valueOf(last.getOrDefault("stdout", "")).trim());
+        result.put("lineCount", String.valueOf(count.getOrDefault("stdout", "")).trim());
+        return result;
     }
 
     @Tool(description = "Check basic OS-level health of a registered service's HOST (shared across services on "
@@ -137,12 +146,26 @@ public class ServerLogsTools {
 
         ServerLogConfig config = configService.getByServiceName(serviceName);
         String proc = (processName == null || processName.isBlank()) ? "java" : sanitize(processName);
-        String cmd = "echo '--- uptime/load ---'; uptime; "
-                + "echo '--- memory ---'; free -m; "
-                + "echo '--- disk ---'; df -h; "
-                + "echo '--- process (coarse name match, may miss generic launches) ---'; "
-                + "pgrep -fa " + proc + " || echo 'not running'";
-        return sshService.runCommand(config, cmd);
+
+        // Each check is its own flat command — the old version joined these with ';'
+        // and used '||' for the fallback, both of which the allowlist guard rejects.
+        Map<String, Object> uptime = sshService.runCommand(config, "uptime");
+        Map<String, Object> memory = sshService.runCommand(config, "free -m");
+        Map<String, Object> disk = sshService.runCommand(config, "df -h");
+        Map<String, Object> proc_ = sshService.runCommand(config, "pgrep -fa " + proc);
+
+        String procOut = String.valueOf(proc_.getOrDefault("stdout", "")).trim();
+        String procResult = procOut.isEmpty()
+                ? "not running (no process name matched — coarse check only, see checkServiceLiveness)"
+                : procOut;
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("service", serviceName);
+        result.put("uptimeLoad", String.valueOf(uptime.getOrDefault("stdout", "")).trim());
+        result.put("memory", String.valueOf(memory.getOrDefault("stdout", "")).trim());
+        result.put("disk", String.valueOf(disk.getOrDefault("stdout", "")).trim());
+        result.put("processCoarseMatch", procResult);
+        return result;
     }
 
     @Tool(description = "Accurately check whether a registered service is actually alive, without relying on "
@@ -158,13 +181,23 @@ public class ServerLogsTools {
         ServerLogConfig config = configService.getByServiceName(serviceName);
         String logPath = requireLogPath(config, serviceName);
         String q = shellQuote(logPath);
-        String cmd = "echo '--- process holding log file open (fuser) ---'; "
-                + "fuser -v " + q + " 2>&1; "
-                + "echo '--- log file last write time ---'; "
-                + "stat -c 'last write: %y' " + q + " 2>/dev/null; "
-                + "echo '--- current server time ---'; "
-                + "date";
-        return sshService.runCommand(config, cmd);
+
+        // Each check is its own flat command — the old version joined these with ';',
+        // which the allowlist guard always rejects. fuser -v writes its findings to
+        // stderr, so both streams are captured here.
+        Map<String, Object> fuser = sshService.runCommand(config, "fuser -v " + q);
+        Map<String, Object> stat = sshService.runCommand(config, "stat -c 'last write: %y' " + q);
+        Map<String, Object> date = sshService.runCommand(config, "date");
+
+        String fuserInfo = (String.valueOf(fuser.getOrDefault("stdout", "")).trim()
+                + " " + String.valueOf(fuser.getOrDefault("stderr", "")).trim()).trim();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("service", serviceName);
+        result.put("processHoldingLogOpen", fuserInfo.isEmpty() ? "no process currently has the file open" : fuserInfo);
+        result.put("logLastWriteTime", String.valueOf(stat.getOrDefault("stdout", "")).trim());
+        result.put("serverCurrentTime", String.valueOf(date.getOrDefault("stdout", "")).trim());
+        return result;
     }
 
     // ------------------------------------------------------------------
